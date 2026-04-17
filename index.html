@@ -1,1 +1,542 @@
+import React, { useState, useEffect } from 'react';
+import { Play, CheckCircle, Calendar, Star, Plus, Trash2, Edit3, X, Tv, Sparkles, Loader2 } from 'lucide-react';
 
+// 初期データ（モック）
+const initialData = [
+  { id: 1, title: '葬送のフリーレン', status: 'completed', rating: 5, memo: '作画も音楽もストーリーも最高。エルフの寿命感覚の表現が秀逸。', imageUrl: '' },
+  { id: 2, title: '呪術廻戦 懐玉・玉折／渋谷事変', status: 'completed', rating: 5, memo: 'バトルシーンのアニメーションが圧巻。', imageUrl: '' },
+  { id: 3, title: 'ダンジョン飯', status: 'watching', rating: 4, memo: '魔物食の解像度が高くてお腹が空く。', imageUrl: '' },
+  { id: 4, title: '忘却バッテリー', status: 'watching', rating: 4, memo: 'ギャグとシリアスのバランスが良い！', imageUrl: '' },
+  { id: 5, title: '怪獣8号', status: 'plan_to_watch', rating: 0, memo: '話題作なので週末に一気見する予定。', imageUrl: '' },
+  { id: 6, title: '慎重勇者～この勇者が俺TUEEEくせに慎重すぎる～', status: 'completed', rating: 5, memo: 'レディ・パーフェクトリー。ギャグとシリアスの落差が最高でした。', imageUrl: 'https://placehold.co/200x200/2e1065/e9d5ff?text=Hero' },
+];
+
+export default function App() {
+  const [animes, setAnimes] = useState(initialData);
+  const [filter, setFilter] = useState('all');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  
+  // AIおすすめモーダル用ステート
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+  const [aiRecommendations, setAiRecommendations] = useState([]);
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
+
+  // フォーム用ステート
+  const [editingId, setEditingId] = useState(null);
+  const [isMemoGenerating, setIsMemoGenerating] = useState(false);
+  const [formData, setFormData] = useState({
+    title: '',
+    status: 'watching',
+    rating: 3,
+    memo: '',
+    imageUrl: ''
+  });
+
+  // 統計情報
+  const stats = {
+    total: animes.length,
+    watching: animes.filter(a => a.status === 'watching').length,
+    completed: animes.filter(a => a.status === 'completed').length,
+    plan: animes.filter(a => a.status === 'plan_to_watch').length,
+  };
+
+  // -------------------------
+  // Gemini API 呼び出し関数
+  // -------------------------
+  const callGeminiAPI = async (prompt, isJson = false) => {
+    const apiKey = ""; // 実行環境で自動付与されます
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+    const payload = {
+      contents: [{ parts: [{ text: prompt }] }],
+    };
+
+    if (isJson) {
+      payload.generationConfig = {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            recommendations: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  title: { type: "STRING" },
+                  reason: { type: "STRING" }
+                },
+                required: ["title", "reason"]
+              }
+            }
+          },
+          required: ["recommendations"]
+        }
+      };
+    }
+
+    let delay = 1000;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        return isJson ? JSON.parse(text) : text;
+      } catch (error) {
+        if (i === 4) throw error;
+        await new Promise(r => setTimeout(r, delay));
+        delay *= 2;
+      }
+    }
+  };
+
+  // AI機能1: お気に入りからおすすめを提案
+  const handleGetRecommendations = async () => {
+    setIsAiModalOpen(true);
+    setIsAiLoading(true);
+    setAiError('');
+    setAiRecommendations([]);
+
+    // 高評価（星4以上）のアニメタイトルを抽出
+    const favoriteTitles = animes
+      .filter(a => a.rating >= 4 && a.status !== 'plan_to_watch')
+      .map(a => a.title);
+
+    const prompt = `私は以下の日本のアニメを高く評価しています：
+${favoriteTitles.length > 0 ? favoriteTitles.join('、') : 'まだデータがありませんが、一般的な名作アニメが好きです。'}
+
+これらを見たことがあり、気に入っている視聴者に向けて、次に見るべきおすすめのアニメを3つ提案してください。
+私がすでに挙げたアニメは除外してください。
+それぞれのタイトルと、なぜおすすめなのか（100文字程度の熱意ある紹介文）を教えてください。`;
+
+    try {
+      const result = await callGeminiAPI(prompt, true);
+      if (result && result.recommendations) {
+        setAiRecommendations(result.recommendations);
+      } else {
+        throw new Error("フォーマットエラー");
+      }
+    } catch (err) {
+      setAiError('AIからの提案を取得できませんでした。しばらく経ってから再度お試しください。');
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  // AI機能2: 感想を自動生成・拡張
+  const handleGenerateMemo = async () => {
+    if (!formData.title) return;
+    setIsMemoGenerating(true);
+    
+    let prompt = '';
+    if (formData.memo.trim() === '') {
+      // メモが空の場合は新規作成
+      prompt = `アニメ「${formData.title}」について、${formData.status === 'watching' ? '視聴中の期待感や面白さ' : '完走後の感想や見どころ'}を100〜150文字程度で、アニメ好きのブログ風に書いてください。`;
+      if (formData.status !== 'plan_to_watch') {
+         prompt += `なお、私の評価は5段階中${formData.rating}です。この評価テンションに合わせてください。`;
+      }
+    } else {
+      // メモがある場合は膨らませる
+      prompt = `以下はアニメ「${formData.title}」に関する短い感想です。
+元の感想: 「${formData.memo}」
+この感想の意図を汲み取りつつ、もう少し詳しく、熱量のある文章（150文字程度）に書き直してください。`;
+    }
+
+    try {
+      const generatedText = await callGeminiAPI(prompt, false);
+      if (generatedText) {
+        setFormData(prev => ({ ...prev, memo: generatedText }));
+      }
+    } catch (err) {
+      console.error(err);
+      // エラー時は特に通知せず静かに失敗させる（ユーザー体験のため）
+    } finally {
+      setIsMemoGenerating(false);
+    }
+  };
+
+  // -------------------------
+  // 既存のハンドラー類
+  // -------------------------
+  const handleOpenModal = (anime = null, prefillTitle = '', prefillMemo = '') => {
+    if (anime) {
+      setEditingId(anime.id);
+      setFormData({ title: anime.title, status: anime.status, rating: anime.rating, memo: anime.memo, imageUrl: anime.imageUrl || '' });
+    } else {
+      setEditingId(null);
+      setFormData({ title: prefillTitle, status: 'plan_to_watch', rating: 0, memo: prefillMemo, imageUrl: '' });
+    }
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsModalOpen(false);
+    setEditingId(null);
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!formData.title.trim()) return;
+
+    if (editingId) {
+      setAnimes(animes.map(a => a.id === editingId ? { ...formData, id: editingId } : a));
+    } else {
+      setAnimes([{ ...formData, id: Date.now() }, ...animes]);
+    }
+    handleCloseModal();
+  };
+
+  const handleDelete = (id) => {
+    if (confirm('本当に削除しますか？')) {
+      setAnimes(animes.filter(a => a.id !== id));
+    }
+  };
+
+  const filteredAnimes = animes.filter(a => filter === 'all' || a.status === filter);
+
+  const getStatusDisplay = (status) => {
+    switch (status) {
+      case 'watching': return { text: '視聴中', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30', icon: <Play size={14} className="mr-1" /> };
+      case 'completed': return { text: '完走済', color: 'bg-green-500/20 text-green-400 border-green-500/30', icon: <CheckCircle size={14} className="mr-1" /> };
+      case 'plan_to_watch': return { text: '見たい', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30', icon: <Calendar size={14} className="mr-1" /> };
+      default: return { text: '不明', color: 'bg-gray-500/20 text-gray-400', icon: null };
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans p-4 md:p-8">
+      <div className="max-w-5xl mx-auto">
+        
+        {/* ヘッダー */}
+        <header className="flex flex-col md:flex-row justify-between items-center mb-8 gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-3 bg-indigo-600 rounded-xl shadow-lg shadow-indigo-500/30">
+              <Tv size={28} className="text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-white tracking-tight">My Anime List</h1>
+              <p className="text-slate-400 text-sm">自分だけのアニメ記録</p>
+            </div>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+            <button 
+              onClick={handleGetRecommendations}
+              className="flex items-center gap-2 bg-gradient-to-r from-fuchsia-600 to-purple-600 hover:from-fuchsia-500 hover:to-purple-500 text-white px-5 py-2.5 rounded-lg font-medium transition-all w-full sm:w-auto justify-center shadow-lg shadow-purple-500/20 hover:shadow-purple-500/40"
+            >
+              <Sparkles size={18} />
+              <span>✨ AIおすすめ</span>
+            </button>
+            <button 
+              onClick={() => handleOpenModal()}
+              className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-lg font-medium transition-colors w-full sm:w-auto justify-center shadow-lg shadow-indigo-500/20"
+            >
+              <Plus size={18} />
+              <span>新規アニメを追加</span>
+            </button>
+          </div>
+        </header>
+
+        {/* 統計パネル */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col justify-center items-center">
+            <span className="text-slate-400 text-sm mb-1">登録数</span>
+            <span className="text-3xl font-bold text-white">{stats.total}</span>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col justify-center items-center">
+            <span className="text-blue-400 text-sm mb-1 flex items-center gap-1"><Play size={14}/> 視聴中</span>
+            <span className="text-3xl font-bold text-white">{stats.watching}</span>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col justify-center items-center">
+            <span className="text-green-400 text-sm mb-1 flex items-center gap-1"><CheckCircle size={14}/> 完走済</span>
+            <span className="text-3xl font-bold text-white">{stats.completed}</span>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex flex-col justify-center items-center">
+            <span className="text-purple-400 text-sm mb-1 flex items-center gap-1"><Calendar size={14}/> 見たい</span>
+            <span className="text-3xl font-bold text-white">{stats.plan}</span>
+          </div>
+        </div>
+
+        {/* フィルター */}
+        <div className="flex gap-2 mb-6 overflow-x-auto pb-2 scrollbar-hide">
+          {[
+            { id: 'all', label: 'ALL' },
+            { id: 'watching', label: '視聴中' },
+            { id: 'completed', label: '完走済' },
+            { id: 'plan_to_watch', label: '見たい' }
+          ].map(f => (
+            <button
+              key={f.id}
+              onClick={() => setFilter(f.id)}
+              className={`px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-all ${
+                filter === f.id 
+                  ? 'bg-slate-700 text-white shadow-md' 
+                  : 'bg-slate-900/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+
+        {/* アニメリスト */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+          {filteredAnimes.length > 0 ? (
+            filteredAnimes.map(anime => {
+              const statusInfo = getStatusDisplay(anime.status);
+              return (
+                <div key={anime.id} className="bg-slate-900 border border-slate-800 rounded-xl p-5 hover:border-slate-700 transition-colors group flex flex-col h-full">
+                  <div className="flex gap-4 mb-3">
+                    {/* アイコン画像表示部分 */}
+                    {anime.imageUrl ? (
+                      <img src={anime.imageUrl} alt={anime.title} className="w-16 h-16 rounded-xl object-cover flex-shrink-0 border border-slate-700 shadow-sm bg-slate-800" />
+                    ) : (
+                      <div className="w-16 h-16 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0 text-2xl font-bold text-slate-500 shadow-sm">
+                        {anime.title.charAt(0)}
+                      </div>
+                    )}
+                    
+                    <div className="flex-1 min-w-0">
+                      <div className="flex justify-between items-start mb-1">
+                        <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-xs font-semibold border ${statusInfo.color}`}>
+                          {statusInfo.icon}
+                          {statusInfo.text}
+                        </span>
+                        
+                        <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button onClick={() => handleOpenModal(anime)} className="p-1 text-slate-400 hover:text-indigo-400 hover:bg-indigo-400/10 rounded-md transition-colors">
+                            <Edit3 size={16} />
+                          </button>
+                          <button onClick={() => handleDelete(anime.id)} className="p-1 text-slate-400 hover:text-rose-400 hover:bg-rose-400/10 rounded-md transition-colors">
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <h3 className="text-lg font-bold text-white line-clamp-2 leading-tight">{anime.title}</h3>
+                    </div>
+                  </div>
+                  
+                  {/* レーティング */}
+                  {anime.status !== 'plan_to_watch' && (
+                    <div className="flex items-center gap-1 mb-3">
+                      {[...Array(5)].map((_, i) => (
+                        <Star 
+                          key={i} 
+                          size={16} 
+                          className={i < anime.rating ? "text-yellow-400 fill-yellow-400" : "text-slate-700"} 
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {/* メモ */}
+                  <div className="mt-auto pt-3 border-t border-slate-800/50">
+                    <p className="text-sm text-slate-400 line-clamp-3">
+                      {anime.memo || <span className="italic opacity-50">メモはありません</span>}
+                    </p>
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="col-span-full py-16 flex flex-col items-center justify-center text-slate-500 bg-slate-900/30 rounded-xl border border-slate-800/50 border-dashed">
+              <Tv size={48} className="mb-4 opacity-20" />
+              <p className="text-lg">アニメが見つかりません</p>
+              <p className="text-sm mt-1">右上のボタンから追加してみましょう</p>
+            </div>
+          )}
+        </div>
+
+        {/* --- AIおすすめモーダル --- */}
+        {isAiModalOpen && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+            <div className="bg-slate-900 border border-purple-500/30 rounded-2xl shadow-2xl shadow-purple-900/20 w-full max-w-lg overflow-hidden flex flex-col max-h-[80vh]">
+              <div className="flex justify-between items-center p-5 border-b border-slate-800 bg-slate-900/50">
+                <h2 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-fuchsia-400 to-purple-400 flex items-center gap-2">
+                  <Sparkles size={20} className="text-purple-400"/>
+                  AI アニメコンシェルジュ
+                </h2>
+                <button onClick={() => setIsAiModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">
+                  <X size={24} />
+                </button>
+              </div>
+              
+              <div className="p-5 overflow-y-auto">
+                {isAiLoading ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-purple-400">
+                    <Loader2 size={40} className="animate-spin mb-4" />
+                    <p className="text-slate-300 font-medium">あなたの好みを分析して、おすすめを厳選中...</p>
+                  </div>
+                ) : aiError ? (
+                  <div className="text-rose-400 text-center py-8">{aiError}</div>
+                ) : (
+                  <div className="flex flex-col gap-4">
+                    <p className="text-sm text-slate-400 mb-2">あなたの高評価リストをもとに、次に見るべき作品を3つピックアップしました。</p>
+                    {aiRecommendations.map((rec, idx) => (
+                      <div key={idx} className="bg-slate-950 border border-slate-800 rounded-xl p-4 hover:border-purple-500/50 transition-colors">
+                        <div className="flex justify-between items-start gap-4">
+                          <div>
+                            <h3 className="text-lg font-bold text-white mb-2">{rec.title}</h3>
+                            <p className="text-sm text-slate-400 leading-relaxed">{rec.reason}</p>
+                          </div>
+                          <button
+                            onClick={() => {
+                              setIsAiModalOpen(false);
+                              handleOpenModal(null, rec.title, `【AIのおすすめ理由】\n${rec.reason}`);
+                            }}
+                            className="shrink-0 flex items-center gap-1 bg-purple-600/20 text-purple-300 hover:bg-purple-600 hover:text-white px-3 py-1.5 rounded-lg text-sm font-medium transition-colors border border-purple-500/30"
+                          >
+                            <Plus size={16} /> 追加
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- 編集・追加モーダル --- */}
+        {isModalOpen && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden max-h-[90vh] flex flex-col">
+              <div className="flex justify-between items-center p-5 border-b border-slate-800 shrink-0">
+                <h2 className="text-xl font-bold text-white">
+                  {editingId ? 'アニメを編集' : 'アニメを追加'}
+                </h2>
+                <button onClick={handleCloseModal} className="text-slate-400 hover:text-white transition-colors">
+                  <X size={24} />
+                </button>
+              </div>
+              
+              <div className="overflow-y-auto">
+                <form onSubmit={handleSubmit} className="p-5 flex flex-col gap-5">
+                  {/* タイトル */}
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-1.5">タイトル <span className="text-rose-500">*</span></label>
+                    <input 
+                      type="text" 
+                      required
+                      value={formData.title}
+                      onChange={(e) => setFormData({...formData, title: e.target.value})}
+                      placeholder="例: 進撃の巨人"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                    />
+                  </div>
+
+                  {/* 画像URL */}
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-1.5">アイコン画像URL</label>
+                    <input 
+                      type="url" 
+                      value={formData.imageUrl}
+                      onChange={(e) => setFormData({...formData, imageUrl: e.target.value})}
+                      placeholder="例: https://example.com/image.jpg"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                    />
+                  </div>
+
+                  {/* ステータス */}
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300 mb-1.5">ステータス</label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: 'watching', label: '視聴中', icon: <Play size={14}/> },
+                        { id: 'completed', label: '完走済', icon: <CheckCircle size={14}/> },
+                        { id: 'plan_to_watch', label: '見たい', icon: <Calendar size={14}/> },
+                      ].map(opt => (
+                        <button
+                          type="button"
+                          key={opt.id}
+                          onClick={() => setFormData({...formData, status: opt.id})}
+                          className={`flex flex-col items-center justify-center gap-1.5 py-3 rounded-lg border text-sm transition-all ${
+                            formData.status === opt.id 
+                              ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' 
+                              : 'bg-slate-950 border-slate-700 text-slate-400 hover:border-slate-500'
+                          }`}
+                        >
+                          {opt.icon}
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 評価 (見たいもの以外) */}
+                  {formData.status !== 'plan_to_watch' && (
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300 mb-1.5">評価</label>
+                      <div className="flex gap-2">
+                        {[1, 2, 3, 4, 5].map(star => (
+                          <button
+                            type="button"
+                            key={star}
+                            onClick={() => setFormData({...formData, rating: star})}
+                            className="focus:outline-none transform hover:scale-110 transition-transform"
+                          >
+                            <Star 
+                              size={28} 
+                              className={star <= formData.rating ? "text-yellow-400 fill-yellow-400" : "text-slate-700"} 
+                            />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* メモ */}
+                  <div>
+                    <div className="flex justify-between items-center mb-1.5">
+                      <label className="block text-sm font-medium text-slate-300">感想・メモ</label>
+                      <button
+                        type="button"
+                        onClick={handleGenerateMemo}
+                        disabled={!formData.title || isMemoGenerating}
+                        className="text-xs flex items-center gap-1 text-purple-400 hover:text-purple-300 disabled:text-slate-600 transition-colors bg-purple-500/10 px-2 py-1 rounded-md border border-purple-500/20"
+                      >
+                        {isMemoGenerating ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                        {formData.memo ? '感想を膨らませる' : '自動生成する'}
+                      </button>
+                    </div>
+                    <textarea 
+                      value={formData.memo}
+                      onChange={(e) => setFormData({...formData, memo: e.target.value})}
+                      placeholder="面白かったポイントや見どころなど..."
+                      rows={4}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all resize-none"
+                    />
+                  </div>
+
+                  {/* ボタン */}
+                  <div className="flex gap-3 mt-2 pt-5 border-t border-slate-800 shrink-0">
+                    <button 
+                      type="button" 
+                      onClick={handleCloseModal}
+                      className="flex-1 px-4 py-2.5 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800 transition-colors font-medium"
+                    >
+                      キャンセル
+                    </button>
+                    <button 
+                      type="submit"
+                      className="flex-1 px-4 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/20 transition-colors font-medium flex justify-center items-center gap-2"
+                    >
+                      保存する
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
